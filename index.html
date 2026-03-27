@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CatGo · 猫咪围棋</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===== 启动屏 ===== -->
+<div id="screen-start" class="screen active">
+  <div class="start-bg"></div>
+  <div class="start-content">
+    <div class="logo-area">
+      <canvas id="logo-canvas" width="120" height="120"></canvas>
+      <h1>CatGo</h1>
+      <p class="subtitle">猫咪围棋 · ねこ碁</p>
+    </div>
+    <div class="start-buttons">
+      <button class="btn-primary" onclick="App.showScreen('screen-mode')">开始游戏</button>
+      <button class="btn-secondary" onclick="App.showScreen('screen-rank-test')">棋力测试</button>
+      <button class="btn-ghost" onclick="App.showScreen('screen-rules')">游戏规则</button>
+    </div>
+    <div class="paw-deco">🐾</div>
+  </div>
+</div>
+
+<!-- ===== 模式选择屏 ===== -->
+<div id="screen-mode" class="screen">
+  <div class="screen-header">
+    <button class="btn-back" onclick="App.showScreen('screen-start')">← 返回</button>
+    <h2>游戏设置</h2>
+  </div>
+  <div class="mode-content">
+    <div class="setting-group">
+      <label>棋盘大小</label>
+      <div class="btn-group" id="size-group">
+        <button class="btn-option" data-val="9" onclick="App.setSetting('size',9,this)">9路</button>
+        <button class="btn-option active" data-val="13" onclick="App.setSetting('size',13,this)">13路</button>
+        <button class="btn-option" data-val="19" onclick="App.setSetting('size',19,this)">19路</button>
+      </div>
+    </div>
+    <div class="setting-group">
+      <label>执子颜色</label>
+      <div class="btn-group" id="color-group">
+        <button class="btn-option active" data-val="black" onclick="App.setSetting('color','black',this)">⚫ 执黑</button>
+        <button class="btn-option" data-val="white" onclick="App.setSetting('color','white',this)">⚪ 执白</button>
+      </div>
+    </div>
+    <div class="setting-group">
+      <label>AI 难度 <span class="rank-hint" id="rank-hint"></span></label>
+      <div class="difficulty-slider-wrap">
+        <input type="range" id="difficulty-slider" min="1" max="10" value="5"
+               oninput="App.setDifficulty(this.value)">
+        <div class="difficulty-labels">
+          <span>入门</span><span>业余</span><span>段位</span>
+        </div>
+        <div class="difficulty-display" id="difficulty-display">难度 5</div>
+      </div>
+    </div>
+    <div class="setting-group">
+      <label>贴目</label>
+      <div class="btn-group" id="komi-group">
+        <button class="btn-option" data-val="0" onclick="App.setSetting('komi',0,this)">0目</button>
+        <button class="btn-option active" data-val="6.5" onclick="App.setSetting('komi',6.5,this)">6.5目</button>
+        <button class="btn-option" data-val="7.5" onclick="App.setSetting('komi',7.5,this)">7.5目</button>
+      </div>
+    </div>
+    <button class="btn-primary btn-start-game" onclick="App.startGame()">开始对局 🐱</button>
+  </div>
+</div>
+
+<!-- ===== 棋力测试屏 ===== -->
+<div id="screen-rank-test" class="screen">
+  <div class="screen-header">
+    <button class="btn-back" onclick="App.showScreen('screen-start')">← 返回</button>
+    <h2>棋力测试</h2>
+  </div>
+  <div class="rank-test-content">
+    <div id="rank-intro-area">
+      <div class="rank-cat-icon">🐱</div>
+      <p>通过解答围棋死活题和手筋题来评估棋力，共 <strong>20</strong> 道题（死活题 10 道 + 手筋题 10 道），每题限时 <strong>30秒</strong>。根据得分评定棋力等级，参考聊卫平围棋道场级段位标准。</p>
+      <button id="rank-start-btn" class="btn-primary" onclick="RankTest.start()">开始测试 🐾</button>
+    </div>
+    <div id="rank-test-area" class="hidden">
+      <div class="rank-progress">
+        <span id="rank-q-num">第 1 题 / 共 20 题</span>
+        <div class="rank-timer-bar"><div id="rank-timer-fill"></div></div>
+        <span id="rank-timer-text">30s</span>
+      </div>
+      <canvas id="rank-canvas" width="360" height="360"></canvas>
+      <p id="rank-hint-text" class="rank-hint-text">请点击正确的落子位置</p>
+    </div>
+    <div id="rank-result" class="rank-result hidden">
+      <div class="rank-result-icon" id="rank-result-icon">🏆</div>
+      <h3>你的棋力评估</h3>
+      <div class="rank-badge" id="rank-badge">业余 3 级</div>
+      <p id="rank-result-desc"></p>
+      <div class="rank-result-btns">
+        <button class="btn-primary" onclick="App.applyRankToGame()">用此难度开始游戏</button>
+        <button class="btn-secondary" onclick="RankTest.start()">重新测试</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 游戏屏 ===== -->
+<div id="screen-game" class="screen">
+  <div class="game-layout">
+
+    <!-- 顶部：胜率条 -->
+    <div class="win-rate-panel">
+      <div class="win-rate-labels">
+        <span class="wr-label-player">你</span>
+        <span class="wr-label-text" id="win-rate-text">势均力敌</span>
+        <span class="wr-label-ai">AI</span>
+      </div>
+      <div class="win-rate-bar-wrap">
+        <div class="win-rate-bar-player" id="win-rate-bar-player"></div>
+        <div class="win-rate-bar-ai" id="win-rate-bar-ai"></div>
+      </div>
+    </div>
+
+    <!-- 中间：侧边栏 + 棋盘 -->
+    <div class="game-main">
+      <!-- 左侧信息栏 -->
+      <div class="game-sidebar left">
+        <div class="player-card" id="card-black">
+          <canvas class="player-stone-icon" width="44" height="44" id="icon-black"></canvas>
+          <div class="player-info">
+            <span class="player-name" id="player-black-name">黑方</span>
+            <span class="player-captures" id="captures-black">提子: 0</span>
+          </div>
+          <div class="turn-indicator active" id="turn-black">▶</div>
+        </div>
+        <div class="score-board">
+          <div class="score-item">
+            <span class="score-label">黑子</span>
+            <span class="score-val" id="score-black">-</span>
+          </div>
+          <div class="score-item">
+            <span class="score-label">白子</span>
+            <span class="score-val" id="score-white">-</span>
+          </div>
+        </div>
+        <div class="move-info">
+          <span id="move-count">第 0 手</span>
+          <span id="ko-hint" class="ko-hint hidden">劫争!</span>
+        </div>
+      </div>
+
+      <!-- 棋盘区 -->
+      <div class="game-board-wrap">
+        <canvas id="game-canvas"></canvas>
+        <div id="game-overlay" class="game-overlay hidden">
+          <div class="overlay-content">
+            <div class="overlay-cat">🐱</div>
+            <h2 id="overlay-title">游戏结束</h2>
+            <p id="overlay-desc"></p>
+            <div class="overlay-btns">
+              <button class="btn-primary" onclick="Game.restart()">再来一局</button>
+              <button class="btn-secondary" onclick="App.showScreen('screen-start')">返回主页</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧控制栏 -->
+      <div class="game-sidebar right">
+        <div class="player-card" id="card-white">
+          <canvas class="player-stone-icon" width="44" height="44" id="icon-white"></canvas>
+          <div class="player-info">
+            <span class="player-name">白方 (AI)</span>
+            <span class="player-captures" id="captures-white">提子: 0</span>
+          </div>
+          <div class="turn-indicator" id="turn-white"></div>
+        </div>
+        <div class="ai-thinking hidden" id="ai-thinking">
+          <div class="thinking-dots"><span></span><span></span><span></span></div>
+          <span>AI 思考中...</span>
+        </div>
+        <div class="control-buttons">
+          <button class="btn-ctrl" onclick="Game.pass()">虚手 Pass</button>
+          <button class="btn-ctrl" onclick="Game.undo()">悔棋 ↩</button>
+          <button class="btn-ctrl" onclick="Game.resign()">认输 🏳</button>
+          <button class="btn-ctrl btn-hint" onclick="Game.requestHint()">提示 💡</button>
+          <button class="btn-ctrl btn-end-game" onclick="Game.endGame()">结束棋局 🏁</button>
+        </div>
+        <div class="difficulty-badge" id="game-difficulty-badge">难度 5</div>
+        <button class="btn-ghost btn-sm" onclick="App.showScreen('screen-start')">← 主页</button>
+      </div>
+    </div>
+
+    <!-- 底部：落子评语面板 -->
+    <div class="comment-panel" id="comment-wrap">
+      <span class="comment-icon" id="comment-icon">💬</span>
+      <span class="move-comment-text" id="move-comment">落子后将显示评语...</span>
+    </div>
+
+    <!-- 移动端底部操作栏（仅小屏显示） -->
+    <div class="mobile-action-bar" id="mobile-action-bar">
+      <button class="mob-btn" onclick="Game.pass()">
+        <span class="mob-btn-icon">⏭</span>
+        <span class="mob-btn-label">虚手</span>
+      </button>
+      <button class="mob-btn" onclick="Game.undo()">
+        <span class="mob-btn-icon">↩</span>
+        <span class="mob-btn-label">悔棋</span>
+      </button>
+      <button class="mob-btn mob-btn-end" onclick="Game.resign()">
+        <span class="mob-btn-icon">🏁</span>
+        <span class="mob-btn-label">结束棋局</span>
+      </button>
+      <button class="mob-btn" onclick="Game.requestHint()">
+        <span class="mob-btn-icon">💡</span>
+        <span class="mob-btn-label">提示</span>
+      </button>
+      <button class="mob-btn mob-btn-home" onclick="App.showScreen('screen-start')">
+        <span class="mob-btn-icon">🏠</span>
+        <span class="mob-btn-label">主页</span>
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ===== 规则屏 ===== -->
+<div id="screen-rules" class="screen">
+  <div class="screen-header">
+    <button class="btn-back" onclick="App.showScreen('screen-start')">← 返回</button>
+    <h2>围棋规则</h2>
+  </div>
+  <div class="rules-content">
+    <div class="rule-item"><h3>🎯 基本规则</h3><p>黑白双方轮流在棋盘交叉点落子，黑方先行。</p></div>
+    <div class="rule-item"><h3>💨 气</h3><p>棋子上下左右相邻的空交叉点称为"气"。没有气的棋子（或棋群）将被提走。</p></div>
+    <div class="rule-item"><h3>🔄 劫</h3><p>不能立即重新提回对方刚提走的棋子（劫争规则）。</p></div>
+    <div class="rule-item"><h3>🏁 胜负</h3><p>双方均虚手后游戏结束，计算围住的空点数加上提子数，白方加贴目，多者获胜。</p></div>
+    <div class="rule-item"><h3>🐱 猫咪表情</h3><p>棋子会根据处境显示不同表情：😊 安全 · 😤 紧张（只剩2气）· 😱 危险（只剩1气）！</p></div>
+  </div>
+</div>
+
+<script src="go-engine.js"></script>
+<script src="renderer.js"></script>
+<script src="ai.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
