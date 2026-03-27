@@ -216,54 +216,178 @@ class GoAI {
     return bestAtari;
   }
 
-  // 布局阶段：星位、天元、小目
+  // ============================================================
+  // 布局定式库（围棋常识：角→边→中）
+  // ============================================================
+
+  // 获取四个角的"占角点"（星位 + 小目 + 三三）
+  _getCornerPoints(n) {
+    // 9路：星位在(2,2)等，小目在(2,3)等，三三在(2,2)
+    // 13路：星位(3,3)，小目(3,4)，三三(2,2)
+    // 19路：星位(3,3)，小目(3,4)/(4,3)，三三(2,2)
+    const k = n <= 9 ? 2 : 3; // 星位距边距离
+    return [
+      // 左上角
+      { corner: 'TL', star: [k, k], komoku: [k, k+1], komoku2: [k+1, k], sansan: [k-1, k-1] },
+      // 右上角
+      { corner: 'TR', star: [k, n-1-k], komoku: [k, n-2-k], komoku2: [k+1, n-1-k], sansan: [k-1, n-k] },
+      // 左下角
+      { corner: 'BL', star: [n-1-k, k], komoku: [n-1-k, k+1], komoku2: [n-2-k, k], sansan: [n-k, k-1] },
+      // 右下角
+      { corner: 'BR', star: [n-1-k, n-1-k], komoku: [n-1-k, n-2-k], komoku2: [n-2-k, n-1-k], sansan: [n-k, n-k] },
+    ];
+  }
+
+  // 判断某角是否已被占（有棋子在角部区域）
+  _isCornerOccupied(engine, cornerDef, n) {
+    const k = n <= 9 ? 2 : 3;
+    const range = k + 2;
+    const [cr, cc] = cornerDef.corner === 'TL' ? [0, 0]
+      : cornerDef.corner === 'TR' ? [0, n-1]
+      : cornerDef.corner === 'BL' ? [n-1, 0]
+      : [n-1, n-1];
+    const dr = cr === 0 ? 1 : -1;
+    const dc = cc === 0 ? 1 : -1;
+    for (let i = 0; i <= range; i++)
+      for (let j = 0; j <= range; j++) {
+        const r = cr + dr * i, c = cc + dc * j;
+        if (engine.inBounds(r, c) && engine.board[r][c] !== 0) return true;
+      }
+    return false;
+  }
+
+  // 布局阶段主逻辑（严格遵循围棋常识）
   _openingMove(engine, color, moveNum) {
     const n = engine.size;
-    // 星位坐标（9路、13路、19路）
-    const starPoints = this._getStarPoints(n);
-    // 天元
     const center = Math.floor(n / 2);
+    const corners = this._getCornerPoints(n);
 
-    // 过滤已占用的星位
-    const freeStars = starPoints.filter(([r, c]) => engine.board[r][c] === 0);
-    if (freeStars.length === 0) return null;
-
-    // 前几手优先占星位
+    // ── 阶段1：前8手，优先占角（角→角→角→角）──
     if (moveNum < 8) {
-      // 选择离对方棋子最远的星位（避免被压制）
-      const oppStones = [];
-      for (let r = 0; r < n; r++)
-        for (let c = 0; c < n; c++)
-          if (engine.board[r][c] === -color) oppStones.push([r, c]);
+      // 找空角，按优先级：星位 > 小目（随机选一种）
+      const emptyCorners = corners.filter(cd => !this._isCornerOccupied(engine, cd, n));
 
-      if (oppStones.length === 0) {
-        // 第一手：天元或星位
-        if (engine.board[center][center] === 0 && Math.random() < 0.3) return [center, center];
-        return freeStars[Math.floor(Math.random() * freeStars.length)];
-      }
+      if (emptyCorners.length > 0) {
+        // 选择与对方棋子对角的空角（围棋常识：不要紧挨对方）
+        const oppStones = [];
+        for (let r = 0; r < n; r++)
+          for (let c = 0; c < n; c++)
+            if (engine.board[r][c] === -color) oppStones.push([r, c]);
 
-      // 选择与对方棋子保持适当距离的星位
-      let bestStar = freeStars[0];
-      let bestScore = -Infinity;
-      for (const [sr, sc] of freeStars) {
-        let minDist = Infinity;
-        for (const [or, oc] of oppStones) {
-          const d = Math.abs(sr - or) + Math.abs(sc - oc);
-          minDist = Math.min(minDist, d);
+        let targetCorner = emptyCorners[0];
+        if (oppStones.length > 0) {
+          // 选离对方最远的空角
+          let maxDist = -1;
+          for (const cd of emptyCorners) {
+            const pt = cd.star;
+            let minD = Infinity;
+            for (const [or, oc] of oppStones)
+              minD = Math.min(minD, Math.abs(pt[0]-or) + Math.abs(pt[1]-oc));
+            if (minD > maxDist) { maxDist = minD; targetCorner = cd; }
+          }
         }
-        // 距离适中（不太近也不太远）
-        const score = minDist > 4 ? minDist : -minDist;
-        if (score > bestScore) { bestScore = score; bestStar = [sr, sc]; }
+
+        // 随机选星位或小目（星位概率60%，小目40%）
+        const pts = Math.random() < 0.6
+          ? [targetCorner.star, targetCorner.komoku, targetCorner.komoku2]
+          : [targetCorner.komoku, targetCorner.komoku2, targetCorner.star];
+
+        for (const pt of pts) {
+          if (engine.inBounds(pt[0], pt[1]) && engine.board[pt[0]][pt[1]] === 0)
+            return pt;
+        }
       }
-      return bestStar;
+
+      // 四角都被占了，才考虑天元（moveNum>=4 且四角已满）
+      if (emptyCorners.length === 0 && engine.board[center][center] === 0) {
+        return [center, center];
+      }
     }
 
-    // 中盘布局：挂角、拆边
-    if (moveNum < 20) {
-      const approach = this._findApproachMove(engine, color, n);
-      if (approach) return approach;
+    // ── 阶段2：8-16手，守角或挂角 ──
+    if (moveNum >= 4 && moveNum < 16) {
+      // 优先守角（己方占了角，对方还没挂）
+      const guardMove = this._findGuardMove(engine, color, n, corners);
+      if (guardMove) return guardMove;
+
+      // 挂角（对方占了角，我方去挂）
+      const approachMove = this._findApproachMove(engine, color, n);
+      if (approachMove) return approachMove;
     }
 
+    // ── 阶段3：16-25手，拆边 ──
+    if (moveNum >= 8 && moveNum < 25) {
+      const splitMove = this._findSplitMove(engine, color, n);
+      if (splitMove) return splitMove;
+    }
+
+    return null;
+  }
+
+  // 守角：己方占了角，在旁边守（防止对方三三入侵）
+  _findGuardMove(engine, color, n, corners) {
+    const k = n <= 9 ? 2 : 3;
+    for (const cd of corners) {
+      if (engine.board[cd.star[0]][cd.star[1]] !== color) continue;
+      // 己方占了星位，守角点（一间守/二间守）
+      const guards = [
+        [cd.star[0], cd.star[1] + (cd.corner === 'TL' || cd.corner === 'BL' ? 2 : -2)],
+        [cd.star[0] + (cd.corner === 'TL' || cd.corner === 'TR' ? 2 : -2), cd.star[1]],
+        [cd.star[0], cd.star[1] + (cd.corner === 'TL' || cd.corner === 'BL' ? 1 : -1)],
+        [cd.star[0] + (cd.corner === 'TL' || cd.corner === 'TR' ? 1 : -1), cd.star[1]],
+      ];
+      for (const g of guards) {
+        if (engine.inBounds(g[0], g[1]) && engine.board[g[0]][g[1]] === 0) {
+          // 确认附近没有对方棋子（不是紧急应对）
+          let hasOpp = false;
+          for (const [nr, nc] of engine.neighbors(g[0], g[1]))
+            if (engine.board[nr][nc] === -color) { hasOpp = true; break; }
+          if (!hasOpp) return g;
+        }
+      }
+    }
+    return null;
+  }
+
+  // 拆边：在己方棋子之间的边上落子（拆二/拆三）
+  _findSplitMove(engine, color, n) {
+    const k = n <= 9 ? 2 : 3;
+    // 扫描四条边，找己方棋子之间的空点
+    const edges = [
+      { row: k, colRange: [k, n-1-k] },       // 上边
+      { row: n-1-k, colRange: [k, n-1-k] },   // 下边
+      { col: k, rowRange: [k, n-1-k] },        // 左边
+      { col: n-1-k, rowRange: [k, n-1-k] },   // 右边
+    ];
+
+    for (const edge of edges) {
+      if (edge.row !== undefined) {
+        const r = edge.row;
+        const [cMin, cMax] = edge.colRange;
+        for (let c = cMin + 2; c <= cMax - 2; c++) {
+          if (engine.board[r][c] !== 0) continue;
+          // 检查两侧是否有己方棋子（拆二/拆三）
+          let leftOwn = false, rightOwn = false;
+          for (let dc = 1; dc <= 3; dc++) {
+            if (c - dc >= 0 && engine.board[r][c-dc] === color) leftOwn = true;
+            if (c + dc < n && engine.board[r][c+dc] === color) rightOwn = true;
+          }
+          if (leftOwn && rightOwn) return [r, c];
+        }
+      } else {
+        const col = edge.col;
+        const [rMin, rMax] = edge.rowRange;
+        for (let r = rMin + 2; r <= rMax - 2; r++) {
+          if (engine.board[r][col] !== 0) continue;
+          let topOwn = false, botOwn = false;
+          for (let dr = 1; dr <= 3; dr++) {
+            if (r - dr >= 0 && engine.board[r-dr][col] === color) topOwn = true;
+            if (r + dr < n && engine.board[r+dr][col] === color) botOwn = true;
+          }
+          if (topOwn && botOwn) return [r, col];
+        }
+      }
+    }
     return null;
   }
 
@@ -597,133 +721,233 @@ class GoAI {
   }
 
   // ============================================================
-  // 落子评语生成
+  // AI 落子教学解说（指导棋：解释为什么走这里）
   // ============================================================
   _generateAIComment(engine, move, color) {
-    if (!move) return '🤔 局面复杂，选择虚手观望';
+    if (!move) return '🤔 局面均衡，选择虚手，等待时机';
 
     const [r, c] = move;
     const opp = -color;
     const n = engine.size;
+    const moveNum = engine.moveCount;
+    const neighbors = engine.neighbors(r, c);
 
-    // 检查是否吃子
+    // ── 吃子 ──
     let captureCount = 0;
-    for (const [nr, nc] of engine.neighbors(r, c)) {
+    for (const [nr, nc] of neighbors) {
       if (engine.board[nr][nc] === opp) {
         const grp = engine.getGroup(nr, nc);
         if (grp.liberties.length === 1) captureCount += grp.stones.length;
       }
     }
-    if (captureCount >= 3) return `😼 大吃！一口吃掉 ${captureCount} 子，优势扩大！`;
-    if (captureCount >= 1) return `😸 提子！吃掉 ${captureCount} 颗棋子，局面有利`;
+    if (captureCount >= 3) return `😼 提子 ${captureCount} 子！对方棋子气数耗尽，必须提掉。提子后注意：你的棋子是否也有危险？`;
+    if (captureCount >= 1) return `😸 提子！吃掉 ${captureCount} 颗。提子后原位置变成空点，注意是否形成劫争。`;
 
-    // 检查是否救援
-    for (const [nr, nc] of engine.neighbors(r, c)) {
+    // ── 紧急救援己方 ──
+    for (const [nr, nc] of neighbors) {
       if (engine.board[nr][nc] === color) {
         const grp = engine.getGroup(nr, nc);
-        if (grp.liberties.length === 1) return '😤 紧急救援！棋子危在旦夕，必须逃跑';
+        if (grp.liberties.length === 1) {
+          return `😤 紧急！我方棋子只剩一气，必须逃跑或补气。棋子的气是生命线，气尽即被提。`;
+        }
       }
     }
 
-    // 检查是否紧逼
-    let atariCount = 0;
-    for (const [nr, nc] of engine.neighbors(r, c)) {
+    // ── 打吃（紧逼对方至1气）──
+    let atariTarget = null;
+    for (const [nr, nc] of neighbors) {
       if (engine.board[nr][nc] === opp) {
         const grp = engine.getGroup(nr, nc);
-        if (grp.liberties.length === 2) atariCount += grp.stones.length;
+        if (grp.liberties.length === 2) { atariTarget = grp; break; }
       }
     }
-    if (atariCount >= 2) return `😏 紧逼！对方 ${atariCount} 子陷入危机，步步紧逼`;
-
-    // 布局阶段
-    const starPoints = this._getStarPoints(n);
-    for (const [sr, sc] of starPoints) {
-      if (sr === r && sc === c) return '🐾 占据星位！布局关键点，掌控全局';
+    if (atariTarget) {
+      return `😏 打吃！对方 ${atariTarget.stones.length} 子被压缩到只剩一气。下一手如果对方不逃，就可以提掉。`;
     }
+
+    // ── 布局阶段解说 ──
+    const corners = this._getCornerPoints(n);
     const center = Math.floor(n / 2);
-    if (r === center && c === center) return '⭐ 天元！棋盘中心，影响四方';
 
-    // 边角
-    if (r <= 3 && c <= 3 || r <= 3 && c >= n - 4 || r >= n - 4 && c <= 3 || r >= n - 4 && c >= n - 4) {
-      return '🏠 角部落子，稳固根基';
+    if (moveNum < 8) {
+      // 占角
+      for (const cd of corners) {
+        if ((cd.star[0]===r && cd.star[1]===c)) {
+          return `🐾 占星位！"金角银边草肚皮"——角部是最容易围地的地方。星位(${r},${c})控制角部，是布局要点。`;
+        }
+        if ((cd.komoku[0]===r && cd.komoku[1]===c) || (cd.komoku2[0]===r && cd.komoku2[1]===c)) {
+          return `🏠 占小目！小目比星位更靠近角落，围角效率更高，但需要后续守角。`;
+        }
+      }
+      if (r === center && c === center) {
+        return `⭐ 天元！四角已满，天元是棋盘中心，影响全局势力。`;
+      }
     }
 
-    // 边
-    if (r <= 2 || r >= n - 3 || c <= 2 || c >= n - 3) {
-      return '📐 边部扩张，争夺地盘';
+    if (moveNum >= 4 && moveNum < 16) {
+      // 守角
+      for (const cd of corners) {
+        if (engine.board[cd.star[0]][cd.star[1]] === color) {
+          const guards = [
+            [cd.star[0], cd.star[1] + (cd.corner==='TL'||cd.corner==='BL'?2:-2)],
+            [cd.star[0] + (cd.corner==='TL'||cd.corner==='TR'?2:-2), cd.star[1]],
+          ];
+          for (const g of guards) {
+            if (g[0]===r && g[1]===c) return `🛡️ 守角！己方占了角后，守角可以防止对方三三入侵，巩固角部地盘。`;
+          }
+        }
+      }
+
+      // 挂角
+      for (const cd of corners) {
+        if (engine.board[cd.star[0]][cd.star[1]] === opp) {
+          const dist = Math.abs(cd.star[0]-r) + Math.abs(cd.star[1]-c);
+          if (dist >= 2 && dist <= 4) {
+            return `⚔️ 挂角！对方占了角，我方在旁边挂角，阻止对方扩大角部地盘。挂角是布局的重要手段。`;
+          }
+        }
+      }
+
+      // 拆边
+      const k = n <= 9 ? 2 : 3;
+      if (r === k || r === n-1-k || c === k || c === n-1-k) {
+        return `📐 拆边！在边上拆开，连接两个角部棋子，同时扩大边部势力。拆二/拆三是布局常用手法。`;
+      }
     }
 
-    // 连接
-    let ownNeighbors = 0;
-    for (const [nr, nc] of engine.neighbors(r, c)) {
-      if (engine.board[nr][nc] === color) ownNeighbors++;
-    }
-    if (ownNeighbors >= 2) return '🔗 连接棋形，加强整体';
-    if (ownNeighbors === 1) return '↗️ 延伸发展，扩大势力';
+    // ── 中盘解说 ──
+    if (moveNum >= 16) {
+      // 连接
+      let ownNeighbors = 0;
+      for (const [nr, nc] of neighbors) {
+        if (engine.board[nr][nc] === color) ownNeighbors++;
+      }
+      if (ownNeighbors >= 2) return '🔗 连接！把分散的棋子连成一块，增加气数，棋形更稳固。';
 
-    const comments = [
-      '🎯 精准落子，稳步推进',
-      '💡 此处要点，双方必争',
-      '🌊 扩张势力，蓄势待发',
-      '🐱 猫步轻盈，落子有声',
-      '⚡ 抢占先机，主动出击',
+      // 扩张
+      if (ownNeighbors === 1) {
+        const grp = engine.getGroup(r, c);
+        if (grp.liberties.length >= 5) return '↗️ 延伸！向空旷地带发展，扩大势力范围，同时增加棋子的气。';
+      }
+
+      // 侵消
+      let nearOpp = 0;
+      for (let dr = -3; dr <= 3; dr++)
+        for (let dc = -3; dc <= 3; dc++) {
+          const nr = r+dr, nc = c+dc;
+          if (engine.inBounds(nr,nc) && engine.board[nr][nc] === opp) nearOpp++;
+        }
+      if (nearOpp >= 4) return '🎯 侵消！深入对方势力范围，打乱对方的地盘计划。侵消要注意自身安全。';
+    }
+
+    // ── 收官阶段 ──
+    if (moveNum > engine.size * engine.size * 0.4) {
+      return '🏁 收官！争夺边界，每一目都很关键。收官要从大到小，先走价值高的地方。';
+    }
+
+    const fallback = [
+      '💡 此处是双方必争的要点，先手占据更有利。',
+      '🌊 扩张势力，同时限制对方发展空间。',
+      '⚡ 抢占先机，保持主动权。',
+      '🐱 稳步推进，积累优势。',
     ];
-    return comments[Math.floor(Math.random() * comments.length)];
+    return fallback[Math.floor(Math.random() * fallback.length)];
   }
 
   // ============================================================
-  // 玩家落子评语
+  // 玩家落子评语（指导棋模式：分析好坏，给出建议）
   // ============================================================
   evaluatePlayerMove(engine, r, c, color, captureCount) {
     const opp = -color;
     const n = engine.size;
+    const moveNum = engine.moveCount; // 落子后的手数
 
-    if (captureCount >= 3) return `🎉 精彩！一举吃掉 ${captureCount} 子，漂亮！`;
-    if (captureCount >= 1) return `👍 提子成功！吃掉 ${captureCount} 颗，不错`;
+    // ── 严重错误：填了自己的眼 ──
+    const neighbors = engine.neighbors(r, c);
+    const ownNeighborCount = neighbors.filter(([nr,nc]) => engine.board[nr][nc] === color).length;
+    if (ownNeighborCount === neighbors.length) {
+      return '❌ 填眼！这手棋填了自己的眼，是严重失误。眼是棋子的生命，不能随意填掉。';
+    }
 
-    // 检查是否造成紧逼
-    let atariCount = 0;
-    for (const [nr, nc] of engine.neighbors(r, c)) {
+    // ── 严重错误：布局阶段走天元（前4手）──
+    const center = Math.floor(n / 2);
+    if (r === center && c === center && moveNum <= 4) {
+      return '⚠️ 天元过早！围棋有句话"金角银边草肚皮"，布局应先占角，天元价值不如角部。建议先走星位或小目。';
+    }
+
+    // ── 严重错误：布局阶段走边线第一二路 ──
+    if (moveNum < 15 && (r <= 1 || r >= n-2 || c <= 1 || c >= n-2)) {
+      return '⚠️ 一二路太低！布局阶段走一二路效率极低，棋子被压在边上发展受限。建议走三四路（星位/小目区域）。';
+    }
+
+    // ── 好棋：吃子 ──
+    if (captureCount >= 3) return `🎉 精彩！一举吃掉 ${captureCount} 子！吃子后注意巩固棋形，防止对方反击。`;
+    if (captureCount >= 1) return `👍 提子！吃掉 ${captureCount} 颗棋子。注意吃子后是否有后续手段。`;
+
+    // ── 好棋：打吃（对方只剩1气）──
+    let atariGroups = [];
+    for (const [nr, nc] of neighbors) {
       if (engine.board[nr][nc] === opp) {
         const grp = engine.getGroup(nr, nc);
-        if (grp.liberties.length === 1) atariCount += grp.stones.length;
+        if (grp.liberties.length === 1) atariGroups.push(grp);
       }
     }
-    if (atariCount >= 2) return `⚡ 好棋！${atariCount} 子被打吃，对方危险`;
-    if (atariCount === 1) return '🎯 打吃！对方棋子只剩一气';
-
-    // 检查是否是愚型
-    let ownNeighbors = 0;
-    for (const [nr, nc] of engine.neighbors(r, c)) {
-      if (engine.board[nr][nc] === color) ownNeighbors++;
-    }
-    if (ownNeighbors >= 3) return '⚠️ 注意：此处可能是愚型，棋形偏重';
-
-    // 星位
-    const starPoints = this._getStarPoints(n);
-    for (const [sr, sc] of starPoints) {
-      if (sr === r && sc === c) return '⭐ 占据星位，布局精准！';
+    if (atariGroups.length >= 2) return `⚡ 双打吃！同时威胁两块棋，对方只能救一块，这是手筋！`;
+    if (atariGroups.length === 1) {
+      const sz = atariGroups[0].stones.length;
+      return sz >= 3
+        ? `🎯 打吃 ${sz} 子！对方大块棋只剩一气，下一手可以提掉。`
+        : `🎯 打吃！对方棋子只剩一气，下一手记得提子。`;
     }
 
-    // 边角
-    if ((r === 0 || r === n - 1) && (c === 0 || c === n - 1)) {
-      return '🤔 角落落子，注意后续活棋';
+    // ── 好棋：布局阶段占角 ──
+    const corners = this._getCornerPoints(n);
+    for (const cd of corners) {
+      if ((cd.star[0]===r && cd.star[1]===c) || (cd.komoku[0]===r && cd.komoku[1]===c) || (cd.komoku2[0]===r && cd.komoku2[1]===c)) {
+        if (moveNum <= 12) return '⭐ 好棋！占角是布局的第一要务。"金角银边草肚皮"，角部效率最高。';
+      }
     }
 
-    // 检查是否填了自己的眼
-    const allNeighborsOwn = engine.neighbors(r, c).every(([nr, nc]) =>
-      engine.board[nr][nc] === color || !engine.inBounds(nr, nc)
-    );
-    if (allNeighborsOwn) return '❌ 警告：填了自己的眼！这是愚型';
+    // ── 提示：布局阶段还有空角 ──
+    if (moveNum < 16) {
+      const emptyCorners = corners.filter(cd => !this._isCornerOccupied(engine, cd, n));
+      if (emptyCorners.length > 0) {
+        return `💡 还有 ${emptyCorners.length} 个空角未占。布局阶段应优先占角，角部是最容易围地的地方。`;
+      }
+    }
 
-    const comments = [
-      '👌 落子稳健，继续加油',
-      '🤔 此处有一定道理，继续观察',
-      '💪 积极进取，保持节奏',
-      '🐾 落子有力，局面均衡',
-      '📍 稳扎稳打，步步为营',
-    ];
-    return comments[Math.floor(Math.random() * comments.length)];
+    // ── 提示：愚型（棋形过重）──
+    if (ownNeighborCount >= 3) {
+      return '⚠️ 棋形偏重！四周都是自己的棋子，这手棋效率低。围棋讲究"棋形轻灵"，不要把棋子堆在一起。';
+    }
+
+    // ── 提示：紧逼对方（对方只剩2气）──
+    let pressureCount = 0;
+    for (const [nr, nc] of neighbors) {
+      if (engine.board[nr][nc] === opp) {
+        const grp = engine.getGroup(nr, nc);
+        if (grp.liberties.length === 2) pressureCount += grp.stones.length;
+      }
+    }
+    if (pressureCount >= 2) return `😏 施压！对方 ${pressureCount} 子只剩两气，继续追击可能吃掉。`;
+
+    // ── 提示：连接己方棋子 ──
+    if (ownNeighborCount === 2) return '🔗 连接！把两块棋连在一起，棋形更加稳固。连接是围棋的基本功。';
+
+    // ── 提示：延伸发展 ──
+    if (ownNeighborCount === 1) {
+      const grp = engine.getGroup(r, c);
+      if (grp.liberties.length >= 4) return '↗️ 延伸发展，棋形舒展，气多。继续扩大势力范围。';
+    }
+
+    // ── 中性评语（根据局面阶段）──
+    if (moveNum < 20) {
+      return '📍 布局阶段，重点是占角、守角、挂角，建立根据地。';
+    } else if (moveNum < 50) {
+      return '⚔️ 中盘战斗，注意棋子的气数，随时准备攻击或防守。';
+    } else {
+      return '🏁 收官阶段，每一目都很重要，注意边界的争夺。';
+    }
   }
 
   _wouldCapture(engine, r, c) {
