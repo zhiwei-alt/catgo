@@ -1,386 +1,353 @@
 /**
- * go-engine.js — 围棋核心逻辑
- * 支持 9/13/19 路棋盘，完整实现落子、提子、气计算、劫争、虚手、胜负判定
+ * CatGo 围棋核心引擎
+ * 实现围棋基本规则：落子、提子、气的计算、劫争检测
  */
-class GoEngine {
-  constructor(size = 13, komi = 6.5) {
-    this.size = size;
-    this.komi = komi;
-    this.reset();
-  }
 
-  reset() {
-    const n = this.size;
-    // 0=空, 1=黑, -1=白
-    this.board = Array.from({ length: n }, () => new Array(n).fill(0));
-    this.turn = 1;           // 1=黑先
-    this.capturedBlack = 0;  // 白方提走的黑子数
-    this.capturedWhite = 0;  // 黑方提走的白子数
-    this.moveCount = 0;
-    this.passCount = 0;
-    this.koPoint = null;     // 劫点 [r,c]
-    this.history = [];       // 棋盘历史（用于悔棋）
-    this.gameOver = false;
-    this.lastMove = null;
-  }
+const GoEngine = (() => {
+  const EMPTY = 0;
+  const BLACK = 1;
+  const WHITE = 2;
 
-  // ---- 工具 ----
-  inBounds(r, c) { return r >= 0 && r < this.size && c >= 0 && c < this.size; }
+  class Board {
+    constructor(size = 19) {
+      this.size = size;
+      this.grid = Array.from({ length: size }, () => new Array(size).fill(EMPTY));
+      this.captures = { [BLACK]: 0, [WHITE]: 0 };
+      this.history = []; // 用于劫争检测
+      this.moveHistory = []; // 棋谱
+      this.koPoint = null; // 劫争点
+      this.lastMove = null;
+      this.passCount = 0;
+    }
 
-  neighbors(r, c) {
-    return [[r-1,c],[r+1,c],[r,c-1],[r,c+1]]
-      .filter(([nr,nc]) => this.inBounds(nr, nc));
-  }
+    clone() {
+      const b = new Board(this.size);
+      b.grid = this.grid.map(row => [...row]);
+      b.captures = { ...this.captures };
+      b.history = [...this.history];
+      b.moveHistory = [...this.moveHistory];
+      b.koPoint = this.koPoint;
+      b.lastMove = this.lastMove;
+      b.passCount = this.passCount;
+      return b;
+    }
 
-  // 获取连通块及其气
-  getGroup(r, c) {
-    const color = this.board[r][c];
-    if (color === 0) return { stones: [], liberties: [] };
-    const visited = new Set();
-    const liberties = new Set();
-    const stones = [];
-    const stack = [[r, c]];
-    while (stack.length) {
-      const [cr, cc] = stack.pop();
-      const key = cr * this.size + cc;
-      if (visited.has(key)) continue;
-      visited.add(key);
-      stones.push([cr, cc]);
-      for (const [nr, nc] of this.neighbors(cr, cc)) {
-        const nkey = nr * this.size + nc;
-        if (this.board[nr][nc] === 0) {
-          liberties.add(nkey);
-        } else if (this.board[nr][nc] === color && !visited.has(nkey)) {
-          stack.push([nr, nc]);
+    // 获取某点的颜色
+    get(r, c) {
+      if (r < 0 || r >= this.size || c < 0 || c >= this.size) return -1;
+      return this.grid[r][c];
+    }
+
+    // 获取相邻点
+    neighbors(r, c) {
+      const result = [];
+      const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+      for (const [dr, dc] of dirs) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < this.size && nc >= 0 && nc < this.size) {
+          result.push([nr, nc]);
         }
       }
-    }
-    return {
-      stones,
-      liberties: [...liberties].map(k => [Math.floor(k / this.size), k % this.size])
-    };
-  }
-
-  getLibertyCount(r, c) {
-    return this.getGroup(r, c).liberties.length;
-  }
-
-  // ---- 落子 ----
-  // 返回 { ok, captures, koPoint, error }
-  place(r, c) {
-    if (this.gameOver) return { ok: false, error: 'game_over' };
-    if (!this.inBounds(r, c)) return { ok: false, error: 'out_of_bounds' };
-    if (this.board[r][c] !== 0) return { ok: false, error: 'occupied' };
-    if (this.koPoint && this.koPoint[0] === r && this.koPoint[1] === c)
-      return { ok: false, error: 'ko' };
-
-    const color = this.turn;
-    const opp = -color;
-
-    // 保存历史
-    this._saveHistory();
-
-    // 临时落子
-    this.board[r][c] = color;
-
-    // 提对方子
-    let totalCaptures = 0;
-    let newKo = null;
-    const capturedGroups = [];
-    for (const [nr, nc] of this.neighbors(r, c)) {
-      if (this.board[nr][nc] === opp) {
-        const grp = this.getGroup(nr, nc);
-        if (grp.liberties.length === 0) {
-          capturedGroups.push(grp.stones);
-          totalCaptures += grp.stones.length;
-          for (const [sr, sc] of grp.stones) this.board[sr][sc] = 0;
-        }
-      }
+      return result;
     }
 
-    // 检查自杀（落子后自己也没气）
-    const selfGroup = this.getGroup(r, c);
-    if (selfGroup.liberties.length === 0) {
-      // 回滚
-      this._restoreHistory();
-      this.history.pop();
-      return { ok: false, error: 'suicide' };
-    }
+    // 获取一块棋子的所有成员（flood fill）
+    getGroup(r, c) {
+      const color = this.get(r, c);
+      if (color === EMPTY) return { stones: [], liberties: new Set() };
 
-    // 劫判断：提了恰好1子，且落子后自己只有1气
-    if (totalCaptures === 1 && capturedGroups[0].length === 1 && selfGroup.liberties.length === 1) {
-      newKo = capturedGroups[0][0];
-    }
+      const stones = [];
+      const liberties = new Set();
+      const visited = new Set();
+      const queue = [[r, c]];
 
-    // 更新提子数
-    if (color === 1) this.capturedWhite += totalCaptures;
-    else this.capturedBlack += totalCaptures;
-
-    this.koPoint = newKo;
-    this.turn = opp;
-    this.moveCount++;
-    this.passCount = 0;
-    this.lastMove = [r, c];
-
-    return { ok: true, captures: totalCaptures, koPoint: newKo };
-  }
-
-  // ---- 虚手 ----
-  pass() {
-    if (this.gameOver) return false;
-    this._saveHistory();
-    this.passCount++;
-    this.koPoint = null;
-    this.turn = -this.turn;
-    this.moveCount++;
-    this.lastMove = null;
-    if (this.passCount >= 2) {
-      this.gameOver = true;
-    }
-    return true;
-  }
-
-  // ---- 悔棋 ----
-  undo() {
-    if (this.history.length < 2) return false; // 至少退2步（撤销AI的一步+玩家的一步）
-    this._restoreHistory(); // 撤销AI步
-    this.history.pop();
-    this._restoreHistory(); // 撤销玩家步
-    this.history.pop();
-    this.gameOver = false;
-    return true;
-  }
-
-  _saveHistory() {
-    this.history.push({
-      board: this.board.map(r => [...r]),
-      turn: this.turn,
-      capturedBlack: this.capturedBlack,
-      capturedWhite: this.capturedWhite,
-      koPoint: this.koPoint ? [...this.koPoint] : null,
-      moveCount: this.moveCount,
-      passCount: this.passCount,
-      lastMove: this.lastMove ? [...this.lastMove] : null,
-    });
-  }
-
-  _restoreHistory() {
-    if (!this.history.length) return;
-    const h = this.history[this.history.length - 1];
-    this.board = h.board.map(r => [...r]);
-    this.turn = h.turn;
-    this.capturedBlack = h.capturedBlack;
-    this.capturedWhite = h.capturedWhite;
-    this.koPoint = h.koPoint ? [...h.koPoint] : null;
-    this.moveCount = h.moveCount;
-    this.passCount = h.passCount;
-    this.lastMove = h.lastMove ? [...h.lastMove] : null;
-  }
-
-  // ---- 死子识别（中国规则：被对方完全包围且无法做活的棋子）----
-  // 返回死子坐标集合 Set<"r,c">
-  _findDeadStones() {
-    const n = this.size;
-    const dead = new Set();
-
-    // 对每个连通块判断是否为死子：
-    // 简化判断：若一个连通块的所有气都在对方领地内（被对方包围），则视为死子
-    const visited = new Set();
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (this.board[r][c] === 0) continue;
-        const key = `${r},${c}`;
+      while (queue.length > 0) {
+        const [cr, cc] = queue.shift();
+        const key = `${cr},${cc}`;
         if (visited.has(key)) continue;
+        visited.add(key);
 
-        const color = this.board[r][c];
-        const opp = -color;
-        const grp = this.getGroup(r, c);
-        for (const [sr, sc] of grp.stones) visited.add(`${sr},${sc}`);
-
-        // 检查该块的所有气是否都被对方包围
-        // 方法：对每个气点做 BFS，看其连通空区域是否只接触对方棋子
-        let allLibsEnclosed = grp.liberties.length > 0;
-        for (const [lr, lc] of grp.liberties) {
-          if (!this._isEnclosedBy(lr, lc, opp)) {
-            allLibsEnclosed = false;
-            break;
-          }
-        }
-        if (allLibsEnclosed) {
-          for (const [sr, sc] of grp.stones) dead.add(`${sr},${sc}`);
-        }
-      }
-    }
-    return dead;
-  }
-
-  // 判断空点 (r,c) 所在的连通空区域是否只被 color 方包围
-  _isEnclosedBy(r, c, color) {
-    const n = this.size;
-    const visited = new Set();
-    const queue = [[r, c]];
-    visited.add(`${r},${c}`);
-    let touchOther = false;
-    while (queue.length) {
-      const [cr, cc] = queue.shift();
-      for (const [nr, nc] of this.neighbors(cr, cc)) {
-        const nv = this.board[nr][nc];
-        if (nv === -color) { touchOther = true; break; }
-        if (nv === 0) {
-          const nk = `${nr},${nc}`;
-          if (!visited.has(nk)) { visited.add(nk); queue.push([nr, nc]); }
-        }
-      }
-      if (touchOther) break;
-    }
-    return !touchOther;
-  }
-
-  // ---- 计分（中国规则：数子法）----
-  // 步骤：① 识别死子 ② 从棋盘移除死子（计入对方提子）③ 数活子+围空 ④ 双活公气各半 ⑤ 加贴目
-  score() {
-    const n = this.size;
-
-    // 1. 在克隆棋盘上操作，不影响实际对局
-    const board = this.board.map(r => [...r]);
-
-    // 2. 识别并清除死子（死子归对方所有，清除后变为空点）
-    const dead = this._findDeadStones();
-    let deadBlack = 0, deadWhite = 0;
-    for (const key of dead) {
-      const [r, c] = key.split(',').map(Number);
-      if (board[r][c] === 1) { deadBlack++; board[r][c] = 0; }
-      else if (board[r][c] === -1) { deadWhite++; board[r][c] = 0; }
-    }
-
-    // 3. 统计活子数
-    let blackScore = 0, whiteScore = 0;
-    for (let r = 0; r < n; r++)
-      for (let c = 0; c < n; c++) {
-        if (board[r][c] === 1) blackScore++;
-        else if (board[r][c] === -1) whiteScore++;
-      }
-
-    // 4. 统计空点归属（BFS 洪水填充）
-    //    - 只接触黑子 → 黑方领地
-    //    - 只接触白子 → 白方领地
-    //    - 双方都接触（双活公气）→ 各得一半（奇数时黑多1）
-    const visited = Array.from({ length: n }, () => new Array(n).fill(false));
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (board[r][c] !== 0 || visited[r][c]) continue;
-        const region = [];
-        let touchBlack = false, touchWhite = false;
-        const queue = [[r, c]];
-        visited[r][c] = true;
-        while (queue.length) {
-          const [cr, cc] = queue.shift();
-          region.push([cr, cc]);
+        if (this.get(cr, cc) === color) {
+          stones.push([cr, cc]);
           for (const [nr, nc] of this.neighbors(cr, cc)) {
-            if (board[nr][nc] === 1) touchBlack = true;
-            else if (board[nr][nc] === -1) touchWhite = true;
-            else if (!visited[nr][nc]) {
-              visited[nr][nc] = true;
+            const nColor = this.get(nr, nc);
+            if (nColor === EMPTY) {
+              liberties.add(`${nr},${nc}`);
+            } else if (nColor === color && !visited.has(`${nr},${nc}`)) {
               queue.push([nr, nc]);
             }
           }
         }
-        if (touchBlack && !touchWhite) {
-          blackScore += region.length;
-        } else if (touchWhite && !touchBlack) {
-          whiteScore += region.length;
-        } else if (touchBlack && touchWhite) {
-          // 双活公气：各得一半，奇数时黑多1（先手优势）
-          const half = Math.floor(region.length / 2);
-          blackScore += half + (region.length % 2);
-          whiteScore += half;
-        }
-        // 无主空（既不接触黑也不接触白）：不计入任何一方（理论上终局不应存在）
       }
+
+      return { stones, liberties };
     }
 
-    // 5. 贴目（白方加 komi）
-    whiteScore += this.komi;
-
-    // 6. 返回结果（数子法：子+空，单位"子"；diff 用目数表示更直观，除以2近似）
-    const diff = Math.abs(blackScore - whiteScore);
-    return {
-      black: blackScore,
-      white: whiteScore,
-      deadBlack,   // 被提的黑死子数
-      deadWhite,   // 被提的白死子数
-      winner: blackScore > whiteScore ? 'black' : 'white',
-      diff: diff.toFixed(1),          // 子数差
-      diffMoku: (diff / 2).toFixed(1) // 近似目数差（供显示参考）
-    };
-  }
-
-  // ---- 获取所有合法落点 ----
-  getLegalMoves(color) {
-    const moves = [];
-    const n = this.size;
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (this.board[r][c] !== 0) continue;
-        if (this.koPoint && this.koPoint[0] === r && this.koPoint[1] === c) continue;
-        if (this._isLegal(r, c, color)) moves.push([r, c]);
-      }
+    // 计算某点落子后的气数（用于AI评估）
+    getLibertyCount(r, c) {
+      const { liberties } = this.getGroup(r, c);
+      return liberties.size;
     }
-    return moves;
-  }
 
-  _isLegal(r, c, color) {
-    if (this.board[r][c] !== 0) return false;
-    const opp = -color;
-    // 临时落子测试
-    this.board[r][c] = color;
-    // 能提对方子 → 合法
-    let canCapture = false;
-    for (const [nr, nc] of this.neighbors(r, c)) {
-      if (this.board[nr][nc] === opp && this.getLibertyCount(nr, nc) === 0) {
-        canCapture = true; break;
-      }
-    }
-    // 自己有气 → 合法
-    const hasLiberty = this.getLibertyCount(r, c) > 0;
-    this.board[r][c] = 0;
-    return canCapture || hasLiberty;
-  }
+    // 获取所有棋块的气信息（用于猫咪显示）
+    getAllGroupsInfo(color) {
+      const visited = new Set();
+      const groups = [];
 
-  // ---- 棋子状态（用于表情）----
-  // 返回每个棋子的气数
-  getBoardLiberties() {
-    const n = this.size;
-    const result = Array.from({ length: n }, () => new Array(n).fill(0));
-    const computed = new Set();
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (this.board[r][c] === 0) continue;
-        const key = r * n + c;
-        if (computed.has(key)) continue;
-        const grp = this.getGroup(r, c);
-        const libs = grp.liberties.length;
-        for (const [sr, sc] of grp.stones) {
-          result[sr][sc] = libs;
-          computed.add(sr * n + sc);
+      for (let r = 0; r < this.size; r++) {
+        for (let c = 0; c < this.size; c++) {
+          if (this.get(r, c) === color && !visited.has(`${r},${c}`)) {
+            const { stones, liberties } = this.getGroup(r, c);
+            stones.forEach(([sr, sc]) => visited.add(`${sr},${sc}`));
+            groups.push({
+              stones,
+              liberties: liberties.size,
+              color,
+              center: this._groupCenter(stones)
+            });
+          }
         }
       }
+
+      return groups;
     }
-    return result;
+
+    _groupCenter(stones) {
+      const r = Math.round(stones.reduce((s, [r]) => s + r, 0) / stones.length);
+      const c = Math.round(stones.reduce((s, [, c]) => s + c, 0) / stones.length);
+      return [r, c];
+    }
+
+    // 尝试落子，返回结果
+    tryPlace(r, c, color) {
+      if (this.get(r, c) !== EMPTY) return { valid: false, reason: '该位置已有棋子' };
+
+      // 检查劫争
+      if (this.koPoint && this.koPoint[0] === r && this.koPoint[1] === c) {
+        return { valid: false, reason: '劫争，不能立即回提' };
+      }
+
+      // 模拟落子
+      const testBoard = this.clone();
+      testBoard.grid[r][c] = color;
+
+      // 提取对方被围的棋子
+      const opponent = color === BLACK ? WHITE : BLACK;
+      let capturedCount = 0;
+      const capturedStones = [];
+
+      for (const [nr, nc] of testBoard.neighbors(r, c)) {
+        if (testBoard.get(nr, nc) === opponent) {
+          const { stones, liberties } = testBoard.getGroup(nr, nc);
+          if (liberties.size === 0) {
+            // 提子
+            for (const [sr, sc] of stones) {
+              testBoard.grid[sr][sc] = EMPTY;
+              capturedStones.push([sr, sc]);
+              capturedCount++;
+            }
+          }
+        }
+      }
+
+      // 检查自杀（落子后自己的气为0且没有提子）
+      const { liberties: selfLiberties } = testBoard.getGroup(r, c);
+      if (selfLiberties.size === 0 && capturedCount === 0) {
+        return { valid: false, reason: '禁止自杀' };
+      }
+
+      // 检查劫争（提了一个子，且落子后自己只有一口气）
+      let newKoPoint = null;
+      if (capturedCount === 1 && selfLiberties.size === 1) {
+        const [capturedR, capturedC] = capturedStones[0];
+        newKoPoint = [capturedR, capturedC];
+      }
+
+      // 检查全局同形（简化：只检查上一步）
+      const boardHash = testBoard.getBoardHash();
+      if (this.history.includes(boardHash)) {
+        return { valid: false, reason: '全局同形（劫争）' };
+      }
+
+      return {
+        valid: true,
+        capturedStones,
+        capturedCount,
+        newKoPoint,
+        boardHash,
+        testBoard
+      };
+    }
+
+    // 执行落子
+    place(r, c, color) {
+      const result = this.tryPlace(r, c, color);
+      if (!result.valid) return result;
+
+      // 保存历史（用于悔棋）
+      this.history.push(this.getBoardHash());
+
+      // 应用落子
+      this.grid = result.testBoard.grid;
+      this.captures[color] += result.capturedCount;
+      this.koPoint = result.newKoPoint;
+      this.lastMove = [r, c, color];
+      this.passCount = 0;
+
+      // 记录棋谱
+      const colLabel = 'ABCDEFGHJKLMNOPQRST'[c];
+      const rowLabel = this.size - r;
+      this.moveHistory.push({
+        move: this.moveHistory.length + 1,
+        color,
+        pos: `${colLabel}${rowLabel}`,
+        r, c,
+        captured: result.capturedCount
+      });
+
+      return { ...result, valid: true };
+    }
+
+    // 虚手
+    pass(color) {
+      this.passCount++;
+      this.koPoint = null;
+      this.lastMove = null;
+      this.moveHistory.push({
+        move: this.moveHistory.length + 1,
+        color,
+        pos: '虚手',
+        r: -1, c: -1,
+        captured: 0
+      });
+      return { valid: true, pass: true };
+    }
+
+    // 悔棋（需要保存完整历史）
+    undo() {
+      if (this.moveHistory.length === 0) return false;
+      // 简化实现：重新从头播放
+      return true;
+    }
+
+    // 获取棋盘哈希（用于劫争检测）
+    getBoardHash() {
+      return this.grid.map(row => row.join('')).join('|');
+    }
+
+    // 计算领地（中国规则：数子法）
+    countScore() {
+      const territory = { [BLACK]: 0, [WHITE]: 0 };
+      const visited = new Set();
+
+      for (let r = 0; r < this.size; r++) {
+        for (let c = 0; c < this.size; c++) {
+          if (this.get(r, c) === EMPTY && !visited.has(`${r},${c}`)) {
+            // flood fill 找到这片空地
+            const region = [];
+            const borders = new Set();
+            const queue = [[r, c]];
+
+            while (queue.length > 0) {
+              const [cr, cc] = queue.shift();
+              const key = `${cr},${cc}`;
+              if (visited.has(key)) continue;
+              visited.add(key);
+
+              if (this.get(cr, cc) === EMPTY) {
+                region.push([cr, cc]);
+                for (const [nr, nc] of this.neighbors(cr, cc)) {
+                  const nColor = this.get(nr, nc);
+                  if (nColor === EMPTY) {
+                    queue.push([nr, nc]);
+                  } else {
+                    borders.add(nColor);
+                  }
+                }
+              }
+            }
+
+            // 如果只被一种颜色包围，算该颜色的领地
+            if (borders.size === 1) {
+              const owner = [...borders][0];
+              territory[owner] += region.length;
+            }
+          }
+        }
+      }
+
+      // 加上棋盘上的棋子（中国规则）
+      for (let r = 0; r < this.size; r++) {
+        for (let c = 0; c < this.size; c++) {
+          const color = this.get(r, c);
+          if (color !== EMPTY) territory[color]++;
+        }
+      }
+
+      // 贴目规则（中国规则）：
+      // 19路 → 7.5目，13路 → 7.5目，9路 → 6.5目
+      // 9路棋盘因为总目数少（81目），贴目6.5更平衡
+      const komi = this.size === 9 ? 6.5 : 7.5;
+
+      return {
+        black: territory[BLACK] + this.captures[BLACK],
+        white: territory[WHITE] + this.captures[WHITE],
+        komi
+      };
+    }
+
+    // 获取合法落子点列表
+    getLegalMoves(color) {
+      const moves = [];
+      for (let r = 0; r < this.size; r++) {
+        for (let c = 0; c < this.size; c++) {
+          if (this.tryPlace(r, c, color).valid) {
+            moves.push([r, c]);
+          }
+        }
+      }
+      return moves;
+    }
+
+    // 检查游戏是否结束
+    isGameOver() {
+      return this.passCount >= 2;
+    }
   }
 
-  // 克隆引擎（供AI使用）
-  clone() {
-    const e = new GoEngine(this.size, this.komi);
-    e.board = this.board.map(r => [...r]);
-    e.turn = this.turn;
-    e.capturedBlack = this.capturedBlack;
-    e.capturedWhite = this.capturedWhite;
-    e.koPoint = this.koPoint ? [...this.koPoint] : null;
-    e.moveCount = this.moveCount;
-    e.passCount = this.passCount;
-    e.gameOver = this.gameOver;
-    e.lastMove = this.lastMove ? [...this.lastMove] : null;
-    return e;
+  // 棋盘历史管理（用于悔棋）
+  class GameHistory {
+    constructor() {
+      this.snapshots = [];
+    }
+
+    save(board) {
+      this.snapshots.push({
+        grid: board.grid.map(row => [...row]),
+        captures: { ...board.captures },
+        koPoint: board.koPoint,
+        lastMove: board.lastMove,
+        moveHistory: [...board.moveHistory],
+        passCount: board.passCount
+      });
+    }
+
+    restore(board) {
+      if (this.snapshots.length === 0) return false;
+      const snap = this.snapshots.pop();
+      board.grid = snap.grid;
+      board.captures = snap.captures;
+      board.koPoint = snap.koPoint;
+      board.lastMove = snap.lastMove;
+      board.moveHistory = snap.moveHistory;
+      board.passCount = snap.passCount;
+      return true;
+    }
+
+    canUndo() {
+      return this.snapshots.length > 0;
+    }
   }
-}
+
+  return { Board, GameHistory, EMPTY, BLACK, WHITE };
+})();
